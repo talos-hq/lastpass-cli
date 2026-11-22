@@ -37,6 +37,7 @@
 #include "util.h"
 #include "blob.h"
 #include "feature-flag.h"
+#include "log.h"
 #include <string.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -165,6 +166,51 @@ out:
 		result = xstrdup("unknown");
 
 	return result;
+}
+
+/*
+ * Log the attributes of a login <error> reply at LOG_DEBUG, so a refused
+ * login can be diagnosed from lpass.log. Only attributes known to carry no
+ * secret are logged with their value; every other one is logged by name and
+ * length (tokens, retry ids and WebAuthn challenges stay out of the log).
+ */
+void xml_error_log(const char *buf)
+{
+	static const char *const plain[] = {
+		"cause", "message", "outofbandname", "outofbandtype", "capabilities",
+		"primary", "server", "allowmultifactortrust", "trustexpired",
+		"trustlabel", "hidedisable", "enabled_providers", "outofbandsupported",
+		"provider", "type",
+	};
+	xmlDoc *doc;
+	xmlNode *root;
+
+	if (lpass_log_level() < LOG_DEBUG || !buf)
+		return;
+	doc = xmlReadMemory(buf, strlen(buf), NULL, NULL, 0);
+	if (!doc) {
+		lpass_log(LOG_DEBUG, "login reply: not XML (%zu bytes)\n", strlen(buf));
+		return;
+	}
+	root = xmlDocGetRootElement(doc);
+	for (xmlNode *child = root ? root->children : NULL; child; child = child->next) {
+		if (xmlStrcmp(child->name, BAD_CAST "error"))
+			continue;
+		for (xmlAttrPtr attr = child->properties; attr; attr = attr->next) {
+			char *val = (char *)xmlNodeListGetString(doc, attr->children, 1);
+			bool show = false;
+
+			for (size_t i = 0; i < sizeof(plain) / sizeof(*plain); ++i)
+				if (!xmlStrcmp(attr->name, BAD_CAST plain[i]))
+					show = true;
+			if (show)
+				lpass_log(LOG_DEBUG, "login reply: %s=\"%s\"\n", attr->name, val ? val : "");
+			else
+				lpass_log(LOG_DEBUG, "login reply: %s=<%zu chars>\n", attr->name, val ? strlen(val) : 0);
+			xmlFree(val);
+		}
+	}
+	xmlFreeDoc(doc);
 }
 
 /*

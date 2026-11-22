@@ -1,3 +1,8 @@
+# Unreleased
+* Fixed login with a FIDO2 security key or passkey as the primary second factor failing at once with "Multifactor authentication failed!" (GitHub issue #719): lpass now uses another enabled factor (LastPass Authenticator push, then a Google Authenticator code), selectable with `LPASS_MFA_PROVIDER`.
+* Fixed a segfault in `login --trust` when out-of-band authentication ended in an error.
+* `LPASS_LOG_LEVEL=7` logs the attributes of a refused login reply (secrets redacted).
+
 # Version 1.6.2
 * Remove certificate pinning; TLS now relies on the system trust store. Older versions fail to connect once LastPass certificates move to the GlobalSign R46/E46 chain, so upgrade is required.
 * Fixed `share userdel` failing to remove groups from shared folders.

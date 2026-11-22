@@ -250,6 +250,48 @@ static const char *gcm_write_attr(void)
 	return on && !strcmp(on, "1") ? " enable_aes_gcm_write=\"1\"" : "";
 }
 
+/*
+ * LPASS_TEST_MFA_FIDO2=1: the account's primary second factor is a FIDO2
+ * key, with LastPass Authenticator and Google Authenticator also enabled
+ * (issue #719). Like the real server, any out-of-band or code request is
+ * refused unless it names an enabled provider and that provider's answer
+ * is right; only a Google Authenticator code (TEST_PASS) gets through.
+ */
+static bool mfa_fido2_primary(void)
+{
+	const char *on = getenv("LPASS_TEST_MFA_FIDO2");
+
+	return on && !strcmp(on, "1");
+}
+
+static bool mfa_fido2_passed(char **argv)
+{
+	char *provider = get_param(argv, "provider");
+	char *otp = get_param(argv, "otp");
+
+	return provider && otp && !strcmp(provider, "googleauth") && !strcmp(otp, "123456");
+}
+
+static char *mfa_fido2_reply(char **argv)
+{
+	char *request = get_param(argv, "outofbandrequest");
+	char *otp = get_param(argv, "otp");
+
+	if ((request && strcmp(request, "0")) || otp)
+		return xstrdup("<response>"
+			"<error message=\"Multifactor authentication failed!\" "
+			"cause=\"multifactorresponsefailed\" type=\"outofband\" "
+			"enabled_providers=\"googleauth,lastpassauth\"/>"
+			"</response>");
+	return xstrdup("<response>"
+		"<error message=\"Multifactor authentication required!\" "
+		"cause=\"outofbandrequired\" capabilities=\"yubikey,fido2\" "
+		"primary=\"fido2\" outofbandtype=\"lastpassauth\" "
+		"outofbandname=\"LastPass Authenticator\" "
+		"enabled_providers=\"googleauth,lastpassauth\"/>"
+		"</response>");
+}
+
 static char *login(char **argv, size_t *len)
 {
 	char *username = get_param(argv, "username");
@@ -261,6 +303,8 @@ static char *login(char **argv, size_t *len)
 		response = xstrdup("<response>"
 			"<error message=\"invalid password\"/>"
 			"</response>");
+	} else if (mfa_fido2_primary() && !mfa_fido2_passed(argv)) {
+		response = mfa_fido2_reply(argv);
 	} else {
 		xasprintf(&response, "<response>"
 			"<ok "

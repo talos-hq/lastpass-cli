@@ -168,6 +168,7 @@ static bool ordinary_login(const char *login_server, const unsigned char key[KDF
 
 	free(*reply);
 	*reply = http_post_lastpass_v(login_server, "login.php", NULL, NULL, args);
+	xml_error_log(*reply);
 	if (!*reply)
 		return error_post(message, session);
 
@@ -226,6 +227,7 @@ static bool oob_login(const char *login_server, const unsigned char key[KDF_HASH
 	for (;;) {
 		free(*reply);
 		*reply = http_post_lastpass_v(login_server, "login.php", NULL, NULL, args);
+		xml_error_log(*reply);
 		if (!*reply) {
 			if (can_do_passcode) {
 				append_post(args, "outofbandrequest", "0");
@@ -269,6 +271,110 @@ out:
 	return ret;
 }
 
+/*
+ * Second factors this client can perform when the account's primary one is
+ * not (issue #719). With a FIDO2/WebAuthn key as primary, login.php answers
+ * cause="outofbandrequired", primary="fido2"; an out-of-band request that
+ * does not name a provider is then checked against the FIDO2 factor and
+ * refused at once with cause="multifactorresponsefailed", so the LastPass
+ * Authenticator push is never sent. Naming another enabled provider in the
+ * "provider" field makes the server use that one instead.
+ */
+static bool provider_enabled(const char *providers, const char *provider)
+{
+	return providers && has_capabilities(providers, provider);
+}
+
+static bool primary_is_unsupported(const char *reply)
+{
+	_cleanup_free_ char *primary = xml_error_cause(reply, "primary");
+	_cleanup_free_ char *capabilities = xml_error_cause(reply, "capabilities");
+
+	if (!strcmp(primary, "fido2"))
+		return true;
+	/* Neither a push nor a typed passcode: nothing we can answer. */
+	return !has_capabilities(capabilities, "outofband") &&
+	       !has_capabilities(capabilities, "passcode");
+}
+
+static bool provider_otp_login(const char *login_server, const unsigned char key[KDF_HASH_LEN], char **args, char **message, char **reply,
+			       const char *provider, const char *otp_name, const char *username, struct session **session)
+{
+	_cleanup_free_ char *code = NULL;
+	_cleanup_free_ char *cause = NULL;
+	const char *retry_error = NULL;
+
+	append_post(args, "provider", provider);
+	append_post(args, "outofbandrequest", "0");
+	append_post(args, "outofbandretry", "0");
+	append_post(args, "outofbandretryid", "");
+	for (int tries = 0; tries < 3; ++tries) {
+		free(code);
+		code = password_prompt("Code", retry_error, "Please enter your %s code for <%s>.", otp_name, username);
+		if (!code)
+			return error_other(message, session, "Aborted multifactor authentication.");
+		append_post(args, "otp", code);
+
+		free(*reply);
+		*reply = http_post_lastpass_v(login_server, "login.php", NULL, NULL, args);
+		xml_error_log(*reply);
+		if (!*reply)
+			return error_post(message, session);
+
+		*session = xml_ok_session(*reply, key);
+		if (*session) {
+			(*session)->server = xstrdup(login_server);
+			return true;
+		}
+
+		free(cause);
+		cause = xml_error_cause(*reply, "cause");
+		if (strcmp(cause, "multifactorresponsefailed") && strcmp(cause, "googleauthfailed") &&
+		    strcmp(cause, "otpfailed"))
+			return error_message(message, session, *reply);
+		retry_error = "Invalid multifactor code; please try again.";
+	}
+	return error_message(message, session, *reply);
+}
+
+/*
+ * Log in with a provider other than the unsupported primary one.
+ * LPASS_MFA_PROVIDER picks one ("lastpassauth" or "googleauth"); otherwise
+ * try the LastPass Authenticator push, then a Google Authenticator code.
+ */
+static bool fallback_provider_login(const char *login_server, const unsigned char key[KDF_HASH_LEN], char **args, char **message, char **reply,
+				    const char *username, struct session **session)
+{
+	_cleanup_free_ char *providers = xml_error_cause(*reply, "enabled_providers");
+	_cleanup_free_ char *oob_name = NULL;
+	const char *wanted = getenv("LPASS_MFA_PROVIDER");
+	bool want_push, want_totp;
+
+	if (wanted && *wanted && !provider_enabled(providers, wanted))
+		return error_other(message, session, "LPASS_MFA_PROVIDER names a provider this account has not enabled.");
+	want_push = provider_enabled(providers, "lastpassauth") && (!wanted || !*wanted || !strcmp(wanted, "lastpassauth"));
+	want_totp = provider_enabled(providers, "googleauth") && (!wanted || !*wanted || !strcmp(wanted, "googleauth"));
+	if (!want_push && !want_totp)
+		return error_other(message, session,
+				   "This account's multifactor method (e.g. a FIDO2 security key) is not supported by lpass, "
+				   "and no LastPass Authenticator or Google Authenticator fallback is enabled.");
+
+	if (want_push) {
+		append_post(args, "provider", "lastpassauth");
+		if (oob_login(login_server, key, args, message, reply, &oob_name, session) && *session)
+			return true;
+		if (!want_totp)
+			return true;
+		/* The push failed: drop its error and offer the code instead. */
+		if (message) {
+			free(*message);
+			*message = NULL;
+		}
+	}
+	return provider_otp_login(login_server, key, args, message, reply, "googleauth",
+				  "Google Authenticator", username, session);
+}
+
 static bool otp_login(const char *login_server, const unsigned char key[KDF_HASH_LEN], char **args, char **message, char **reply, const char *otp_name, const char *cause, const char *username, struct session **session)
 {
 	struct multifactor_type *replied_multifactor = NULL;
@@ -294,6 +400,7 @@ static bool otp_login(const char *login_server, const unsigned char key[KDF_HASH
 
 		free(*reply);
 		*reply = http_post_lastpass_v(login_server, "login.php", NULL, NULL, args);
+		xml_error_log(*reply);
 		if (!*reply)
 			return error_post(message, session);
 
@@ -348,9 +455,16 @@ struct session *lastpass_login(const char *username, const char hash[KDF_HEX_LEN
 		append_post(args, "trustlabel", trusted_label);
 	}
 
+	if (cause && !strcmp(cause, "outofbandrequired") && primary_is_unsupported(reply)) {
+		if (fallback_provider_login(login_server, key, args, error_message, &reply, user_lower, &session) &&
+		    trust && session)
+			http_post_lastpass("trust.php", session, NULL, "token", session->token, "uuid", trusted_id, "trustlabel", trusted_label, NULL);
+		return session;
+	}
+
 	if (cause && !strcmp(cause, "outofbandrequired") &&
 	    oob_login(login_server, key, args, error_message, &reply, &otp_name, &session)) {
-		if (trust)
+		if (trust && session)
 			http_post_lastpass("trust.php", session, NULL, "token", session->token, "uuid", trusted_id, "trustlabel", trusted_label, NULL);
 		return session;
 	}

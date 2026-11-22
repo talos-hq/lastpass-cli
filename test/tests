@@ -16,6 +16,25 @@ function test_login_wrong_pw_should_fail
 	assert $ret
 }
 
+# issue #719: FIDO2 primary factor; fall back to a Google Authenticator code
+function test_login_fido2_primary_falls_back_to_code
+{
+	LPASS_TEST_MFA_FIDO2=1 login
+	assertz $?
+}
+
+function test_login_fido2_primary_named_provider
+{
+	LPASS_TEST_MFA_FIDO2=1 LPASS_MFA_PROVIDER=googleauth login
+	assertz $?
+}
+
+function test_login_fido2_primary_unknown_provider_should_fail
+{
+	LPASS_TEST_MFA_FIDO2=1 LPASS_MFA_PROVIDER=duo login
+	assert $?
+}
+
 function test_add_account
 {
 	login || return 1

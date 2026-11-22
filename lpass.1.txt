@@ -75,6 +75,14 @@ unless the 'LPASS_AGENT_TIMEOUT' environment variable is set to an alternative
 number of seconds in which to quit, or 0 to never quit. If the environment
 variable 'LPASS_AGENT_DISABLE' is set to 1, the agent will not be used.
 
+Multifactor Authentication
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+*lpass* cannot use a FIDO2 security key or passkey. When that is the account's
+primary second factor, *lpass* uses another factor the account has enabled
+instead: a LastPass Authenticator push first, then a Google Authenticator
+code. Set the 'LPASS_MFA_PROVIDER' environment variable to 'lastpassauth' or
+'googleauth' to use only that one.
+
 Password Entry
 ~~~~~~~~~~~~~~
 The *pinentry* program, part of *gpg2*(1), may be used for inputting
@@ -346,6 +354,7 @@ in the section above:
 * 'LPASS_DISABLE_PINENTRY'
 * 'LPASS_ASKPASS'
 * 'LPASS_CLIPBOARD_COMMAND'
+* 'LPASS_MFA_PROVIDER'
 
 EXAMPLES
 --------
